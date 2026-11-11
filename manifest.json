@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Tabby · ChatGPT → PDF",
+  "version": "1.7.2",
+  "description": "Export full ChatGPT conversations to PDF, keeping the original layout and KaTeX math; wide content wraps or scales to fit.",
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ]
+}
