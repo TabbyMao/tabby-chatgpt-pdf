@@ -4,7 +4,7 @@
 
 **⬇️ Download / 下载:** [chatgpt-to-pdf-extension.zip](https://github.com/TabbyMao/tabby-chatgpt-pdf/releases/latest/download/chatgpt-to-pdf-extension.zip)
 
-<p align="center"><img src="docs/button.png" width="420" alt="Export button"></p>
+<p align="center"><img src="button.png" width="420" alt="Export button"></p>
 
 ---
 
@@ -21,7 +21,7 @@ A Chrome extension that exports a **complete** ChatGPT conversation to PDF, or s
 - **Ink-saving code blocks** (can be turned off): code blocks print on a white background. Syntax colors keep their hue (purple stays purple, green stays green) and are only darkened so they stay readable.
 - 12 mm page margins whatever the print dialog's margin setting is. Dark mode is switched to light only during the export.
 
-<p align="center"><img src="docs/code-block.png" width="600" alt="Ink-saving code block"></p>
+<p align="center"><img src="code-block.png" width="600" alt="Ink-saving code block"></p>
 
 ### Install
 
