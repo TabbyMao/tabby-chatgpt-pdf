@@ -71,6 +71,14 @@ html[data-theme="dark"] #cgpt-pdf-fab,html.dark #cgpt-pdf-fab{border-color:#3a3a
 /* —— 图片 —— */
 #${ROOT_ID} img,#${ROOT_ID} video,#${ROOT_ID} canvas{max-width:100%!important;height:auto!important}
 
+/* —— 上传的图片：完整显示 —— */
+#${ROOT_ID} .cgpt-full-box{width:auto!important;height:auto!important;max-width:100%!important;max-height:none!important;
+  min-width:0!important;min-height:0!important;aspect-ratio:auto!important;overflow:visible!important;
+  display:block!important;position:static!important;padding:0!important;background:none!important;border:0!important;flex:0 1 auto!important}
+#${ROOT_ID} img.cgpt-full-img{display:block!important;position:static!important;width:auto!important;height:auto!important;
+  max-width:100%!important;max-height:none!important;object-fit:contain!important;transform:none!important;
+  border-radius:8px;border:1px solid #e5e5e5;margin:4px 0 4px auto}
+
 /* —— 去掉按钮等交互元素 —— */
 #${ROOT_ID} .cgpt-pdf-hide{display:none!important}
 
@@ -128,32 +136,6 @@ html[data-theme="dark"] #cgpt-pdf-fab,html.dark #cgpt-pdf-fab{border-color:#3a3a
       if (/(auto|scroll)/.test(s.overflowY) && p.scrollHeight > p.clientHeight + 10) return p;
     }
     return document.scrollingElement;
-  }
-
-  // 1. 不遗漏：反复滚到顶/底，直到消息数量稳定（触发懒加载）
-  async function loadAllTurns(setStatus) {
-    const first = getTurns()[0];
-    if (!first) return;
-    const sc = scrollParent(first);
-    const saved = sc.scrollTop;
-    let last = -1, stable = 0;
-    for (let i = 0; i < 60 && stable < 3; i++) {
-      // 先往下一点再回到顶部，确保每一轮都会触发 scroll 事件 / IntersectionObserver
-      sc.scrollTop = Math.min(600, sc.scrollHeight);
-      await sleep(80);
-      sc.scrollTop = 0;
-      sc.dispatchEvent(new Event('scroll'));
-      await sleep(450);
-      const n = getTurns().length;
-      setStatus && setStatus(`Loading full conversation… ${n} turns found`);
-      if (n === last) stable++; else { stable = 0; last = n; }
-    }
-    // 再从上到下滚一遍，让 content-visibility / 懒加载图片都渲染出来
-    for (let y = 0; y <= sc.scrollHeight; y += Math.max(400, sc.clientHeight * 0.9)) {
-      sc.scrollTop = y;
-      await sleep(60);
-    }
-    sc.scrollTop = saved;
   }
 
   // 2. 长代码：ChatGPT 的代码编辑器（CodeMirror）只渲染看得见的几十行，其余是空白占位。
@@ -226,6 +208,82 @@ html[data-theme="dark"] #cgpt-pdf-fab,html.dark #cgpt-pdf-fab{border-color:#3a3a
 
   const UI_TEXT = /^(run|run code|copy( code)?|copied!?|edit|share|retry|regenerate|read aloud|good response|bad response|more actions|switch model|复制(代码)?|已复制|编辑|分享|重试|重新生成|朗读|show more|show less|显示更多|收起|显示更少)$/i;
 
+  // 3. 边滚边收集：ChatGPT 只把屏幕附近的消息放进网页（远处的会被移除），
+  //    所以从上往下逐条把每条消息滚到眼前，等它的文字/图片/代码加载完，立刻复制下来，最后按顺序拼起来。
+  function turnKey(t) {
+    return t.getAttribute('data-turn-key') || t.getAttribute('data-testid') || t.getAttribute('data-content-search-turn-key')
+      || t.getAttribute('data-chatgpt-search-unit-key') || t.getAttribute('data-message-id') || ('txt:' + t.textContent.slice(0, 300));
+  }
+  function looksEmpty(t) { // 回复区只有 "ChatGPT said:" 标签、内容还没渲染
+    const a = t.querySelector('[data-chatgpt-search-unit-key$=":assistant"], [data-message-author-role="assistant"]');
+    return !!a && a.textContent.replace(/ChatGPT said:?|ChatGPT 说：?/g, '').trim().length < 2;
+  }
+  async function waitReady(t) {
+    let last = -1, same = 0;
+    for (let i = 0; i < 40 && (same < 2 || (looksEmpty(t) && i < 30)); i++) {
+      const n = t.textContent.length + t.querySelectorAll('img').length * 1000;
+      if (n === last) same++; else { same = 0; last = n; }
+      await sleep(150);
+    }
+    const imgs = [...t.querySelectorAll('img')].filter((i) => !i.complete);
+    await Promise.race([Promise.all(imgs.map((i) => new Promise((r) => { i.onload = i.onerror = r; }))), sleep(4000)]);
+  }
+  async function collectTurns(setStatus) {
+    const first = getTurns()[0];
+    if (!first) return [];
+    const sc = scrollParent(first);
+    const saved = sc.scrollTop;
+    // 先滚到最顶部，直到更早的消息都加载出来
+    let lastH = -1, stable = 0;
+    for (let i = 0; i < 60 && stable < 3; i++) {
+      sc.scrollTop = Math.min(600, sc.scrollHeight); await sleep(80);
+      sc.scrollTop = 0; sc.dispatchEvent(new Event('scroll')); await sleep(450);
+      const h = sc.scrollHeight;
+      if (h === lastH) stable++; else { stable = 0; lastH = h; }
+      setStatus && setStatus('Loading the beginning of the conversation…');
+    }
+    const ordered = [];      // [{key, el}]
+    const seen = new Set();
+    let idle = 0;
+    for (let guard = 0; guard < 3000; guard++) {
+      const mounted = getTurns();
+      const next = mounted.find((t) => !seen.has(turnKey(t)));
+      if (!next) {
+        const atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 4;
+        if (atBottom && ++idle > 3) break;
+        sc.scrollTop += Math.max(200, sc.clientHeight * 0.8);
+        await sleep(atBottom ? 500 : 300);
+        continue;
+      }
+      idle = 0;
+      const key = turnKey(next);
+      next.scrollIntoView({ block: 'start' });
+      await sleep(200);
+      let t = getTurns().find((x) => turnKey(x) === key) || next;
+      await waitReady(t);
+      t = getTurns().find((x) => turnKey(x) === key) || t;
+      await captureEditors([t]);
+      t = getTurns().find((x) => turnKey(x) === key) || t;
+      const c = t.cloneNode(true);
+      cleanClone(c, t);
+      rebuildEditors(c, t);
+      // 按网页里的先后顺序插入
+      const nowMounted = getTurns(), idx = nowMounted.indexOf(t);
+      let pos = ordered.length;
+      if (idx >= 0) {
+        const before = nowMounted.slice(0, idx).reverse().find((x) => seen.has(turnKey(x)));
+        const after = nowMounted.slice(idx + 1).find((x) => seen.has(turnKey(x)));
+        if (before) pos = ordered.findIndex((o) => o.key === turnKey(before)) + 1;
+        else if (after) pos = ordered.findIndex((o) => o.key === turnKey(after));
+      }
+      ordered.splice(Math.max(0, pos), 0, { key, el: c });
+      seen.add(key);
+      setStatus && setStatus(`Collecting messages… ${ordered.length}`);
+    }
+    sc.scrollTop = saved;
+    return ordered.map((o) => o.el);
+  }
+
   const LABEL_TEXT = /^(You said:?|ChatGPT said:?|你说：?|ChatGPT 说：?|You|ChatGPT)$/;
   function cleanClone(clone, original) {
     // 原页面里看不见的元素（悬停才出现的按钮/时间、屏幕阅读器标签）在 PDF 里也隐藏
@@ -244,6 +302,22 @@ html[data-theme="dark"] #cgpt-pdf-fab,html.dark #cgpt-pdf-fab{border-color:#3a3a
       if (n.children.length === 0 && LABEL_TEXT.test(n.textContent.trim())) n.classList.add('cgpt-pdf-hide');
     });
     clone.querySelectorAll('time').forEach((t) => (t.parentElement || t).classList.add('cgpt-pdf-hide'));
+    // 回复内部也会自带「深色」标记：全部换成浅色
+    [clone, ...clone.querySelectorAll('[data-theme], .dark')].forEach((n) => {
+      if (n.getAttribute('data-theme') === 'dark') n.setAttribute('data-theme', 'light');
+      if (n.classList.contains('dark')) { n.classList.remove('dark'); n.classList.add('light'); }
+    });
+    // 你上传的图片（blob: 地址，消息离开屏幕后可能失效）：转成内嵌图片
+    const srcImgs = original.querySelectorAll('img'), dstImgs = clone.querySelectorAll('img');
+    if (srcImgs.length === dstImgs.length) srcImgs.forEach((im, i) => {
+      if (!/^blob:/.test(im.currentSrc || im.src) || !im.complete || !im.naturalWidth) return;
+      try {
+        const cv = document.createElement('canvas');
+        cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+        cv.getContext('2d').drawImage(im, 0, 0);
+        dstImgs[i].src = cv.toDataURL('image/png');
+      } catch (e) { /* 忽略 */ }
+    });
     // canvas（图表等）克隆后是空白的，换成图片
     const srcCanvases = original.querySelectorAll('canvas');
     clone.querySelectorAll('canvas').forEach((c, i) => {
@@ -264,8 +338,25 @@ html[data-theme="dark"] #cgpt-pdf-fab,html.dark #cgpt-pdf-fab{border-color:#3a3a
     // 按钮：纯图标按钮或常见操作按钮隐藏；带有内容（如附件名、"已思考 10 秒"）的保留
     clone.querySelectorAll('button,[role="button"]').forEach((b) => {
       const txt = (b.innerText || b.textContent || '').trim();
-      if (!txt || UI_TEXT.test(txt) || b.querySelector('img') === null && txt.length <= 2) {
+      const media = b.querySelector('img:not([src^="data:image/svg"]), picture, video, canvas'); // 例如你上传的图片
+      if ((!txt && !media) || UI_TEXT.test(txt) || (!media && txt.length <= 2)) {
         b.classList.add('cgpt-pdf-hide');
+      }
+    });
+    // 你上传的图片：ChatGPT 只显示裁剪过的小缩略图，PDF 里改成完整的大图
+    if (srcImgs.length === dstImgs.length) srcImgs.forEach((im, i) => {
+      const src = im.currentSrc || im.src || '';
+      if (/^data:image\/svg/.test(src) || im.naturalWidth < 120) return;
+      const cs = getComputedStyle(im);
+      const r = im.getBoundingClientRect();
+      const thumb = im.closest('button,[role="button"]') || cs.objectFit === 'cover' || im.naturalWidth > r.width * 1.3;
+      if (!thumb) return;
+      const img = dstImgs[i];
+      img.classList.add('cgpt-full-img');
+      // 往外把限制尺寸的容器都放开，直到碰到含有文字的那一层
+      for (let p = img.parentElement; p && p !== clone; p = p.parentElement) {
+        if (p.textContent.trim().length > 0 && !p.matches('button,[role="button"]')) break;
+        p.classList.add('cgpt-full-box');
       }
     });
     // 每条消息下面的操作栏（复制/点赞/朗读等），以及屏幕阅读器专用文字
@@ -459,12 +550,10 @@ html[data-theme="dark"] #cgpt-pdf-fab,html.dark #cgpt-pdf-fab{border-color:#3a3a
 
     overlay.style.visibility = 'hidden'; // 先让原页面能滚动加载
     overlay.style.pointerEvents = 'none';
-    await loadAllTurns(setStatus);
-    await captureEditors(getTurns(), setStatus);
+    const turns = await collectTurns(setStatus);
     overlay.style.visibility = '';
     overlay.style.pointerEvents = '';
 
-    const turns = getTurns();
     if (!turns.length) {
       setStatus('No conversation found on this page. Open a ChatGPT chat first.');
       addButtons(overlay, false);
@@ -482,12 +571,9 @@ html[data-theme="dark"] #cgpt-pdf-fab,html.dark #cgpt-pdf-fab{border-color:#3a3a
     head.querySelector('.cgpt-pdf-meta').textContent = `${location.href} · Exported ${new Date().toLocaleString()}`;
     root.appendChild(head);
 
-    turns.forEach((t) => {
+    turns.forEach((c) => {
       const wrap = document.createElement('div');
       wrap.className = 'cgpt-pdf-turn';
-      const c = t.cloneNode(true);
-      cleanClone(c, t);
-      rebuildEditors(c, t);
       wrap.appendChild(c);
       root.appendChild(wrap);
     });
